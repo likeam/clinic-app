@@ -1,37 +1,40 @@
-import { pipeline } from "@huggingface/transformers";
+// src/whisper.js
+import { pipeline, env } from "@huggingface/transformers";
 
-let transcriber = null;
+// Key: force WASM backend, avoid WebGPU compatibility issues
+env.backends.onnx.wasm.numThreads = 1;
 
-export async function loadWhisper(onProgress) {
-  if (transcriber) return transcriber;
+let transcriberPromise = null;
 
-  // Use tiny model, small size, suitable for browser; first load requires network, subsequent uses cache
-  transcriber = await pipeline(
-    "automatic-speech-recognition",
-    "Xenova/whisper-tiny.en", // English model,
-    { progress_callback: onProgress },
-  );
-  return transcriber;
+export function loadWhisper(onProgress) {
+  if (!transcriberPromise) {
+    transcriberPromise = pipeline(
+      "automatic-speech-recognition",
+      "Xenova/whisper-tiny.en",
+      {
+        dtype: "fp32", // First try the most compatible fp32
+        device: "wasm", // Explicitly use WASM
+        progress_callback: onProgress,
+      },
+    ).catch((err) => {
+      transcriberPromise = null; // Allow retry on failure
+      throw err;
+    });
+  }
+  return transcriberPromise;
 }
 
 export async function transcribeAudio(audioBlob) {
-  if (!transcriber) await loadWhisper();
-
-  // Convert Blob to AudioBuffer
+  const transcriber = await loadWhisper(); // Key: wait for loading to complete
   const arrayBuffer = await audioBlob.arrayBuffer();
   const audioContext = new AudioContext({ sampleRate: 16000 });
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-  // Extract mono channel, get Float32Array
   const audioData = audioBuffer.getChannelData(0);
-
-  // Whisper requires 16kHz, if original sample rate differs, simple resampling needed (omitted here, assume recording already processed)
   const result = await transcriber(audioData, {
     chunk_length_s: 30,
     stride_length_s: 5,
-    language: "en", // Chinese change to 'zh'
+    language: "en",
     task: "transcribe",
   });
-
   return result.text;
 }
